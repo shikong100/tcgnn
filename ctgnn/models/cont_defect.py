@@ -29,21 +29,6 @@ class Cont(nn.Module):
         )
         self.feat_mp_mu = nn.Linear(self.emb_size, self.label_dim) # 2048 -> 38
 
-        self.recon = torch.nn.Sequential(
-            nn.Linear(self.latent_dim, 512), # 64 -> 512 
-            nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Linear(512, self.input_dim) # 512 -> 1000
-        )
-
-        self.label_recon = torch.nn.Sequential(
-            nn.Linear(self.latent_dim, 512), # 64 -> 512 
-            nn.ReLU(),
-            nn.Linear(512, self.emb_size), # 512 -> 2048
-            nn.LeakyReLU()
-        )
-
         # label layers
         self.fe0 = nn.Linear(self.label_dim, self.emb_size) # 38 -> 2048
         self.fe1 = nn.Linear(self.emb_size, 512) # 2048 -> 512
@@ -62,47 +47,6 @@ class Cont(nn.Module):
 
         # things they share
         self.dropout = nn.Dropout(p=self.keep_prob)
-
-    def label_encode(self, x):
-        h0 = self.dropout(F.relu(self.fe0(x))) # [38, 2048]
-        h1 = self.dropout(F.relu(self.fe1(h0))) # [38, 512]
-        h2 = self.dropout(F.relu(self.fe2(h1))) # [38, 256]
-        mu = self.fe_mu(h2) * self.scale_coeff # [38, 64]
-        logvar = self.fe_logvar(h2) * self.scale_coeff # [38, 64]
-        fe_output = {
-            'fe_mu': mu,
-            'fe_logvar': logvar
-        }
-        return fe_output
-
-    def feat_encode(self, x):
-        h1 = self.dropout(F.relu(self.fx1(x))) # [B, 256]
-        h2 = self.dropout(F.relu(self.fx2(h1))) # [B, 512]
-        h3 = self.dropout(F.relu(self.fx3(h2))) # [B, 256]
-        mu = self.fx_mu(h3) * self.scale_coeff # [B, 64]
-        logvar = self.fx_logvar(h3) * self.scale_coeff # [B, 64]
-        fx_output = {
-            'fx_mu': mu,
-            'fx_logvar': logvar
-        }
-        
-        return fx_output
-
-    def label_reparameterize(self, mu, logvar):
-        std = torch.exp(0.5*logvar)
-        eps = torch.randn_like(std)
-        return mu + eps*std
-
-    def feat_reparameterize(self, mu, logvar, coeff=1.0):
-        std = torch.exp(0.5*logvar)
-        eps = torch.randn_like(std)
-        return mu + eps*std
-
-    def label_decode(self, z):
-        d1 = F.relu(self.fd1(z)) # [B, 512]
-        d2 = F.leaky_relu(self.fd2(d1)) # [B, 2048]
-        d3 = F.normalize(d2, dim=1) # [B, 2048]
-        return d3
 
     def feat_decode(self, z):
         d1 = F.relu(self.fd_x1(z)) # [B, 512]
@@ -150,26 +94,3 @@ class Cont(nn.Module):
         feat_recon = self.recon(z)
         fx_output['feat_recon'] = feat_recon
         return fx_output
-
-    def forward(self, label, feature):
-        fe_output = self.label_forward(label, feature)
-        label_emb, single_label_emb = fe_output['label_emb'], fe_output['single_label_emb']
-        fx_output = self.feat_forward(feature)
-        feat_emb, feat_emb2 = fx_output['feat_emb'], fx_output['feat_emb2']
-        embs = self.fe0.weight # [2048, 38]
-        
-        label_out = torch.matmul(label_emb, embs) # [128, 38]
-        single_label_out = torch.matmul(single_label_emb, embs) # [38, 38]
-        feat_out = torch.matmul(feat_emb, embs) # [128, 38]
-        feat_out2 = torch.matmul(feat_emb2, embs) # [128, 38]
-        
-        fe_output.update(fx_output)
-        output = fe_output
-        output['embs'] = embs
-        output['label_out'] = label_out
-        output['single_label_out'] = single_label_out
-        output['feat_out'] = feat_out
-        output['feat_out2'] = feat_out2
-        output['feat'] = feature
-
-        return output
