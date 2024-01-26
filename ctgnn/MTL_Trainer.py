@@ -20,8 +20,6 @@ from class_weight import positive_ratio, inverse_frequency, effective_samples, i
 
 import models.encoders as encoder_models
 import models.decoders as decoder_models
-from models.cont_defect import Cont
-from models.supconloss import SupConLoss
 
 
 class MTL_Model(pl.LightningModule):
@@ -167,65 +165,13 @@ class MTL_Model(pl.LightningModule):
         return losses * torch.exp(
             -self.logvars) + 0.5 * self.logvars  # The regularization term can become negative (i.e. std dev < 1). Possible fix is log(1+ sigma) instad of log(sigma) - https://arxiv.org/abs/1805.06334
 
-    def supconloss_defect(self, input_label, label_emb, feat_emb, embs, temp=1.0, sample_wise=False):
-        # if sample_wise:
-            # loss_func = SupConLoss(temperature=0.1)
-            # return loss_func(torch.stack([label_emb, feat_emb], dim=1), input_label.float())
-
-        features = torch.cat((label_emb, feat_emb))
-        labels = torch.cat((input_label, input_label)).float()
-        n_label = labels.shape[1]
-        emb_labels = torch.eye(n_label).to(feat_emb.device)
-        mask = torch.matmul(labels, emb_labels)
-
-        anchor_dot_contrast = torch.div(
-            torch.matmul(features, embs),
-            temp)
-        logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
-        logits = anchor_dot_contrast - logits_max.detach()
-
-        exp_logits = torch.exp(logits)
-        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
-
-        mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-7)
-        mean_log_prob_neg = ((1.0-mask) * log_prob).sum(1) / ((1.0-mask).sum(1) + 1e-7)
-
-        loss = -mean_log_prob_pos
-        loss = loss.mean()
-
-        return loss
-    
-    def supconloss_water(self, features, label):
-        # features = torch.cat([features.unsqueeze(1), features.unsqueeze(1)], dim=1)
-        loss = self.contrative_water(features, label)
-        return loss
-
-
     def forward(self, x):
         feat_vec = self.encoder(x)
         logits, logits_pre, feat = self.decoder(feat_vec)
         return logits, logits_pre, feat
 
     def train_function(self, x, y):
-        x = torch.cat([x[0], x[1]], dim=0)
 
-        y_hat, y_hat_pre, feat = self(x)
-        bsz = y[0].shape[0]
-        _, y_hat_d = torch.split(y_hat[0], [bsz, bsz], dim=0)
-        _, y_hat_w = torch.split(y_hat[1], [bsz, bsz], dim=0)
-        y_hat = [y_hat_d, y_hat_w]
-        _, y_hat_pre_d = torch.split(y_hat_pre[0], [bsz, bsz], dim=0)
-        _, y_hat_pre_w = torch.split(y_hat_pre[1], [bsz, bsz], dim=0)
-        y_hat_pre = [y_hat_pre_d, y_hat_pre_w]
-
-        # contrastive learning
-        
-        f1, f2 = torch.split(feat[0], [bsz, bsz], dim=0)
-        contrive_defect = self.contrative_defect(y[0], f2)
-        features_water = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1) # [B, 2, 128]
-        
-        losses = []
-        losses_pre = []
         for idx, loss_name in enumerate(self.valid_tasks):
             losses.append(getattr(self, "{}_criterion".format(loss_name))(y_hat[idx], y[self.task_LUT[loss_name]]))
             losses_pre.append(
@@ -236,27 +182,15 @@ class MTL_Model(pl.LightningModule):
         weighted_losses = self.weighted_loss_func(losses)
         weighted_losses_pre = self.weighted_loss_func(losses_pre)
 
-        # contrastive loss
-        conloss = self.supconloss_defect(y[0], contrive_defect['label_emb'], contrive_defect['feat_emb'], contrive_defect['embs'])
-        conloss_water = self.supconloss_water(features_water, y[1])
-
-        conloss = [conloss, conloss_water]
-        conloss = torch.stack(conloss)
-
         return losses, weighted_losses, weighted_losses_pre, conloss
 
     def training_step(self, batch, batch_idx):
         x, y, _ = batch
         losses, weighted_losses, weighted_losses_pre, conloss = self.train_function(x, y)
-
         total_loss = torch.sum(self.sum_loss(weighted_losses, weighted_losses_pre, conloss))
-        wandb.log({'total_train_loss': total_loss})
         self.log('train_loss', total_loss, on_step=False, on_epoch=True, sync_dist=True,
                  prog_bar=True)  # Log individual losses and loss weights
         for idx, loss_name in enumerate(self.valid_tasks):
-            wandb.log({'train_{}_loss'.format(loss_name): losses[idx],
-                        'train_{}_wloss'.format(loss_name): weighted_losses[idx],
-                        'train_{}_conloss'.format(loss_name): conloss[idx],})
             self.log('train_{}_loss'.format(loss_name), losses[idx], on_step=False, on_epoch=True, sync_dist=True,
                      prog_bar=True)  # Log individual losses and loss weights
             self.log('train_{}_wloss'.format(loss_name), weighted_losses[idx], on_step=False, on_epoch=True,
@@ -277,11 +211,7 @@ class MTL_Model(pl.LightningModule):
         total_loss = torch.sum(self.sum_loss(weighted_losses, weighted_losses_pre, conloss))
         self.log('val_loss', total_loss, on_step=False, on_epoch=True, sync_dist=True,
                  prog_bar=False)  # Log individual losses and loss weights
-        wandb.log({'total_val_loss': total_loss})
         for idx, loss_name in enumerate(self.valid_tasks):
-            wandb.log({'val_{}_loss'.format(loss_name): losses[idx],
-                        'val_{}_wloss'.format(loss_name): weighted_losses[idx],
-                        'val_{}_conloss'.format(loss_name): conloss[idx],})
             self.log('val_{}_loss'.format(loss_name), losses[idx], on_step=False, on_epoch=True, sync_dist=True,
                      prog_bar=True)  # Log individual losses and loss weights
             self.log('val_{}_wloss'.format(loss_name), weighted_losses[idx], on_step=False, on_epoch=True,
@@ -421,7 +351,7 @@ def main(args):
     dm = MultiTaskDataModule(batch_size=args.batch_size, workers=args.workers, ann_root=args.ann_root,
                              data_root=args.data_root, train_transform=train_transform, eval_transform=eval_transform, only_defects=args.only_defects)
 
-    dm.prepare_data() # 只在1个GPU上训练，没用
+    dm.prepare_data() # 
     dm.setup("fit") # 训练阶段
 
     # Get the class weights per task
@@ -441,7 +371,6 @@ def main(args):
         assert args.effective_beta < 1.0 and args.effective_beta >= 0.0, "The effective sampling beta need to be in the range [0,1) and not: {}".format(
             args.effective_beta)
 
-        # 要看其他论文Class-Balanced Loss Based on Effective Number of Samples
         defect_weights = effective_samples(dm.train_dataset.defect_labels, dm.defect_num_classes, args.effective_beta)
         water_weights = effective_samples(dm.train_dataset.water_labels, dm.water_num_classes, args.effective_beta)
 
@@ -527,7 +456,6 @@ def main(args):
 
     try:
         trainer.fit(light_model, dm)
-        wandb.finish()
     except Exception as e:
         print(e)
         with open(os.path.join(logger_path, "error.txt"), "w") as f:
@@ -555,21 +483,12 @@ def run_cli():
     parser = MTL_Model.add_model_specific_args(parser)
     args = parser.parse_args()
 
-    # args.workers = args.gpus * 6
-    args.workers = 12
-    # args.workers = 4
 
     if args.decoder == "SimpleHead":
         assert (args.gnn_head == "")
     else:
         assert (args.gnn_head != "")
 
-    
-    wandb.init(
-        project="two-defect",
-        config=args,
-        name="defect-GAT-watercon+defectcon-test-1"
-    )
     main(args)
 
 
