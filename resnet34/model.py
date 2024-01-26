@@ -103,7 +103,6 @@ class ResNet(nn.Module):
         self.layer4 = self._make_layer(block, 512, blocks_num[3], stride=2)
         if self.include_top:
             self.avgpool = nn.AdaptiveAvgPool2d((1, 1))  # output size = (1, 1)
-            self.linu = External_Attention(d_model=512)
             self.fc = nn.Linear(512 * block.expansion, num_classes)
 
         for m in self.modules():
@@ -142,7 +141,6 @@ class ResNet(nn.Module):
 
         if self.include_top:
             x = self.avgpool(x)
-            x = self.linu(x)
             x = torch.flatten(x, 1)
             x = self.fc(x)
 
